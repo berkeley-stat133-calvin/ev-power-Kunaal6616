@@ -8,27 +8,396 @@ format: typst
 ## **Part 0: libraries**
 
 ```{r}
-
+library(tidyverse)
+library(janitor)
+library(sf)
+library(maps)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(scales)
 ```
 
 ## **Part 1:** **Defining Research Question**
+1. Do states with higher EV adoption rates have higher renewable energy usage?
+2. Is there a correlation between electricity prices and renewable energy share by state?
+3. Which states have the cleanest energy mix for charging EVs?
+4. How has renewable energy growth correlated with EV adoption from 2021-2023?
+5. Are there regional patterns in EV adoption relative to energy cleanliness?
 
-Chosen Question:
+Chosen Question: 3. Which states have the cleanest energy mix for charging EVs?
 
 ## **Part 2: Data Preparation and Cleaning**
 
 ```{r}
+# First, check what files are available
+file_list <- list.files(pattern = "\\.csv$")
+print("Available CSV files:")
+print(file_list)
 
+# Check if files are in a different directory (like Downloads or a project folder)
+file_list_downloads <- list.files("~/Downloads", pattern = "\\.csv$")
+print("CSV files in Downloads:")
+print(file_list_downloads)
+
+# If files are in Downloads, set working directory or use full paths
+if(length(file_list_downloads) > 0) {
+  # Set working directory to Downloads (or wherever your files are)
+  setwd("~/Downloads")
+  file_list <- list.files(pattern = "\\.csv$")
+  print("CSV files in current directory after change:")
+  print(file_list)
+}
+
+safe_read_csv <- function(filename) {
+  if(file.exists(filename)) {
+    return(read_csv(filename))
+  } else {
+    warning(paste("File", filename, "not found. Skipping."))
+    return(NULL)
+  }
+}
+
+ev_data <- safe_read_csv("ev-registrations-by_state_2023.csv")
+renew_2021 <- safe_read_csv("renew_use_2021.csv") 
+renew_2022 <- safe_read_csv("renew_use_2022.csv")
+renew_2023 <- safe_read_csv("renew_use_2023.csv")
+energy_price <- safe_read_csv("av_energy_price_2021-2023.csv")
+energy_use_2021 <- safe_read_csv("total_energy_use_2021.csv")
+energy_use_2022 <- safe_read_csv("total_energy_use_2022.csv")
+energy_use_2023 <- safe_read_csv("total_energy_use_2023.csv")
+
+find_files <- function(pattern) {
+  files <- list.files(pattern = pattern, ignore.case = TRUE)
+  if(length(files) > 0) {
+    return(files[1]) # Return first match
+  }
+  return(NULL)
+}
+
+
+if(is.null(ev_data)) {
+  ev_file <- find_files("ev")
+  if(!is.null(ev_file)) {
+    ev_data <- read_csv(ev_file)
+    print(paste("Found EV data in:", ev_file))
+  }
+}
+
+loaded_data <- list(
+  ev_data = !is.null(ev_data),
+  renew_2021 = !is.null(renew_2021),
+  renew_2022 = !is.null(renew_2022), 
+  renew_2023 = !is.null(renew_2023),
+  energy_price = !is.null(energy_price),
+  energy_use_2021 = !is.null(energy_use_2021),
+  energy_use_2022 = !is.null(energy_use_2022),
+  energy_use_2023 = !is.null(energy_use_2023)
+)
+
+print("Data loading status:")
+print(loaded_data)
 ```
 
 ## **Part 3: Joining / Pivoting Datasets for Analysis**
 
 ```{r}
+# Part 3: Joining & Pivoting Datasets (with NULL checking)
 
+print("Checking which datasets loaded successfully:")
+
+data_objects <- list(
+  renew_2021 = renew_2021,
+  renew_2022 = renew_2022,
+  renew_2023 = renew_2023,
+  energy_use_2021 = energy_use_2021,
+  energy_use_2022 = energy_use_2022,
+  energy_use_2023 = energy_use_2023,
+  ev_data = ev_data,
+  energy_price = energy_price
+)
+
+# Check which are not NULL
+loaded_status <- sapply(data_objects, function(x) !is.null(x))
+print("Loaded datasets:")
+print(loaded_status)
+
+# Start building with what we have
+if(loaded_status["renew_2023"] && loaded_status["energy_use_2023"]) {
+  # We have at least 2023 data - use that for analysis
+  
+  # Calculate renewable percentage for 2023
+  renew_percentage_2023 <- renew_2023 %>%
+    group_by(state) %>%
+    summarize(total_renewable = sum(amount, na.rm = TRUE)) %>%
+    left_join(energy_use_2023 %>%
+                group_by(state) %>%
+                summarize(total_energy = sum(amount, na.rm = TRUE)),
+              by = "state") %>%
+    mutate(renew_percent = ifelse(total_energy > 0, 
+                                 (total_renewable / total_energy) * 100, 0))
+  
+  print("Renewable percentage 2023 calculated:")
+  print(head(renew_percentage_2023))
+  
+  # Build analysis dataset step by step
+  analysis_data <- renew_percentage_2023
+  
+  # Add EV data if available
+  if(loaded_status["ev_data"]) {
+    analysis_data <- analysis_data %>%
+      left_join(ev_data, by = "state")
+    print("EV data joined successfully")
+  }
+  
+  # Add energy price data if available (filter for 2023 if year column exists)
+  if(loaded_status["energy_price"]) {
+    if("year" %in% names(energy_price)) {
+      energy_price_2023 <- energy_price %>% filter(year == 2023)
+    } else {
+      energy_price_2023 <- energy_price
+    }
+    analysis_data <- analysis_data %>%
+      left_join(energy_price_2023, by = "state")
+    print("Energy price data joined successfully")
+  }
+  
+} else {
+  # If we don't have the main datasets, create minimal analysis data
+  print("Creating minimal analysis dataset from available data...")
+  
+  # Try to use whatever renewable data we have
+  renew_data_available <- NULL
+  if(loaded_status["renew_2023"]) renew_data_available <- renew_2023
+  else if(loaded_status["renew_2022"]) renew_data_available <- renew_2022  
+  else if(loaded_status["renew_2021"]) renew_data_available <- renew_2021
+  
+  if(!is.null(renew_data_available)) {
+    analysis_data <- renew_data_available %>%
+      group_by(state) %>%
+      summarize(total_renewable = sum(amount, na.rm = TRUE))
+    
+    # Add EV data if available
+    if(loaded_status["ev_data"]) {
+      analysis_data <- analysis_data %>%
+        left_join(ev_data, by = "state")
+    }
+  } else {
+    # Last resort - just use EV data
+    analysis_data <- ev_data
+  }
+}
+
+print("Final analysis dataset structure:")
+print(str(analysis_data))
+print(head(analysis_data))
+
+# Create mapping data (remove any rows with NA in key columns)
+mapping_data <- analysis_data
+if("renew_percent" %in% names(mapping_data)) {
+  mapping_data <- mapping_data %>% drop_na(renew_percent)
+} else if("total_renewable" %in% names(mapping_data)) {
+  mapping_data <- mapping_data %>% drop_na(total_renewable)
+}
+
+print("Mapping dataset ready:")
+print(head(mapping_data))
+
+# Calculate basic statistics with the shown data
+if("renew_percent" %in% names(analysis_data)) {
+  renew_stats <- analysis_data %>%
+    summarize(
+      avg_renewable = mean(renew_percent, na.rm = TRUE),
+      max_renewable = max(renew_percent, na.rm = TRUE),
+      min_renewable = min(renew_percent, na.rm = TRUE)
+    )
+  print("Renewable energy statistics:")
+  print(renew_stats)
+}
+
+if("ev_registrations" %in% names(analysis_data)) {
+  ev_stats <- analysis_data %>%
+    summarize(
+      total_evs = sum(ev_registrations, na.rm = TRUE),
+      avg_evs = mean(ev_registrations, na.rm = TRUE)
+    )
+  print("EV registration statistics:")
+  print(ev_stats)
+}
+
+# Calculate correlations if we have the data
+if("renew_percent" %in% names(analysis_data) && "ev_registrations" %in% names(analysis_data)) {
+  valid_data <- analysis_data %>%
+    filter(!is.na(renew_percent) & !is.na(ev_registrations))
+  
+  if(nrow(valid_data) > 1) {
+    ev_renew_corr <- cor(valid_data$renew_percent, valid_data$ev_registrations)
+    cat("Correlation between renewable % and EV registrations:", round(ev_renew_corr, 3), "\n")
+  }
+}
+
+if("renew_percent" %in% names(analysis_data) && "average_price" %in% names(analysis_data)) {
+  valid_data <- analysis_data %>%
+    filter(!is.na(renew_percent) & !is.na(average_price))
+  
+  if(nrow(valid_data) > 1) {
+    price_renew_corr <- cor(valid_data$renew_percent, valid_data$average_price)
+    cat("Correlation between renewable % and energy prices:", round(price_renew_corr, 3), "\n")
+  }
+}
+
+print("Part 3 completed successfully!")
 ```
 
 ## **Part 4: Mapping Visualization**
 
-```{r}
 
+```{r}
+# Get US states map data
+us_states <- map_data("state")
+
+# Prepare mapping data with proper state names
+mapping_data_clean <- mapping_data
+
+# If we have renewable percentage data, categorize it
+if("renew_percent" %in% names(mapping_data_clean)) {
+  mapping_data_clean <- mapping_data_clean %>%
+    dplyr::mutate(
+      state_lower = tolower(state),
+      renew_category = dplyr::case_when(
+        renew_percent >= 50 ~ "High (≥50%)",
+        renew_percent >= 25 ~ "Medium (25-49%)",
+        renew_percent >= 10 ~ "Low (10-24%)",
+        TRUE ~ "Very Low (<10%)"
+      ),
+      renew_category = factor(renew_category, 
+                             levels = c("Very Low (<10%)", "Low (10-24%)", 
+                                       "Medium (25-49%)", "High (≥50%)"))
+    )
+} else if("total_renewable" %in% names(mapping_data_clean)) {
+  # If we only have total renewable, create a simple classification
+  mapping_data_clean <- mapping_data_clean %>%
+    dplyr::mutate(
+      state_lower = tolower(state),
+      renew_category = dplyr::case_when(
+        total_renewable >= 50000 ~ "High",
+        total_renewable >= 20000 ~ "Medium",
+        total_renewable >= 5000 ~ "Low",
+        TRUE ~ "Very Low"
+      )
+    )
+}
+
+# Join with map data
+map_plot_data <- us_states %>%
+  dplyr::left_join(mapping_data_clean, by = c("region" = "state_lower"))
+
+# Create static map - Renewable Energy by State
+static_map <- ggplot(map_plot_data, aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = renew_category), color = "white", size = 0.2) +
+  scale_fill_viridis_d(option = "plasma", na.value = "grey80") +
+  labs(
+    title = "Renewable Energy Share by State (2023)",
+    subtitle = "Percentage of total energy from renewable sources",
+    fill = "Renewable % Category",
+    caption = "Data: U.S. Energy Information Administration"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  )
+
+print(static_map)
+
+# Create EV registration map if we have the data
+if("ev_registrations" %in% names(mapping_data_clean)) {
+  ev_map_data <- us_states %>%
+    dplyr::left_join(mapping_data_clean, by = c("region" = "state_lower"))
+  
+  ev_map <- ggplot(ev_map_data, aes(x = long, y = lat, group = group)) +
+    geom_polygon(aes(fill = ev_registrations), color = "white", size = 0.2) +
+    scale_fill_viridis_c(option = "magma", na.value = "grey80", 
+                        labels = scales::comma) +
+    labs(
+      title = "EV Registrations by State (2023)",
+      fill = "EV Registrations",
+      caption = "Source: State vehicle registration data"
+    ) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+      legend.position = "bottom"
+    )
+  
+  print(ev_map)
+}
+
+# Create scatter plot: Renewable % vs EV Registrations
+if("renew_percent" %in% names(analysis_data) && "ev_registrations" %in% names(analysis_data)) {
+  scatter_plot <- ggplot(analysis_data, aes(x = renew_percent, y = ev_registrations)) +
+    geom_point(aes(size = ev_registrations, color = renew_percent), alpha = 0.7) +
+    geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed") +
+    scale_color_viridis_c(option = "plasma") +
+    scale_size_continuous(range = c(2, 8)) +
+    labs(
+      title = "Relationship Between Renewable Energy and EV Adoption",
+      x = "Renewable Energy Percentage (%)",
+      y = "EV Registrations",
+      color = "Renewable %",
+      size = "EV Registrations"
+    ) +
+    theme_minimal() +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5))
+  
+  # Calculate and print correlation
+  correlation_val <- cor(analysis_data$renew_percent, analysis_data$ev_registrations, use = "complete.obs")
+  scatter_plot <- scatter_plot + 
+    labs(subtitle = paste("Correlation:", round(correlation_val, 3)))
+  
+  print(scatter_plot)
+}
+
+# Create bar chart of top states by renewable percentage
+if("renew_percent" %in% names(analysis_data)) {
+  top_states <- analysis_data %>%
+    dplyr::arrange(desc(renew_percent)) %>%
+    head(10)
+  
+  bar_plot <- ggplot(top_states, aes(x = reorder(state, renew_percent), y = renew_percent)) +
+    geom_col(aes(fill = renew_percent)) +
+    scale_fill_viridis_c(option = "plasma") +
+    coord_flip() +
+    labs(
+      title = "Top 10 States by Renewable Energy Percentage",
+      x = "State",
+      y = "Renewable Energy (%)",
+      fill = "Renewable %"
+    ) +
+    theme_minimal() +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5))
+  
+  print(bar_plot)
+}
+
+# Create dashboard summary
+cat("\n=== DASHBOARD SUMMARY ===\n")
+if("renew_percent" %in% names(analysis_data)) {
+  avg_renew <- mean(analysis_data$renew_percent, na.rm = TRUE)
+  cat("Average Renewable Energy Percentage:", round(avg_renew, 1), "%\n")
+}
+if("ev_registrations" %in% names(analysis_data)) {
+  total_evs <- sum(analysis_data$ev_registrations, na.rm = TRUE)
+  cat("Total EV Registrations:", scales::comma(total_evs), "\n")
+}
+if("renew_percent" %in% names(analysis_data) && "ev_registrations" %in% names(analysis_data)) {
+  ev_renew_corr <- cor(analysis_data$renew_percent, analysis_data$ev_registrations, use = "complete.obs")
+  cat("Correlation (Renewable % vs EV Registrations):", round(ev_renew_corr, 3), "\n")
+}
+if("renew_percent" %in% names(analysis_data) && "average_price" %in% names(analysis_data)) {
+  price_renew_corr <- cor(analysis_data$renew_percent, analysis_data$average_price, use = "complete.obs")
+  cat("Correlation (Renewable % vs Energy Prices):", round(price_renew_corr, 3), "\n")
+}
 ```
